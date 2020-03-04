@@ -1,0 +1,269 @@
+---
+title: "Intro to DS_Proj 1"
+output: html_notebook
+---
+
+### Project 1 - EDA of Melbourne Housing Market 
+### (Jan 2016 - Mar 2018)
+
+### Introduction
+This analysis will explore the Melbourne Housing Market. The data was collected from Kaggle. This data was scraped from publicly available results posted every week to Domain.com.au. This report will first look at Melbourne's overall Housing Market in regards to the housing price. Then it will focus on EDA of property types, price, distance from DBD, landsize, etc.
+
+
+First, I import the data into R, and gain an overview of the data, confirming if it is adequate for analysis, and if I need to clean the data and identify any abnormal fractions.
+
+```{r}
+house <- read.csv("Mel_Housing_FULL.csv", header = T)
+```
+
+```{r}
+head(house)
+```
+
+```{r}
+str(house)
+```
+
+```{r}
+summary(house)
+```
+
+### From the above overview, we can conclude:
+1. The data is adequate for analysis. In this dataset, there is categorical and numerical data. In addition, the data set is large enough for analysis.
+2. The data type is mixed with facors, intergers, numbers. I might need to change the data type during the analysis.
+3. There are NA data points, which means I need to either remove or transform the missing data points in order to do an accurate analysis.
+4. The variable for property types does not contain NA data points. It might be a good choice to analyse different aspects based on property types.
+
+### Questions & Assumptions
+1. From the summary of sold property prices, I assume that house prices vary greatly.Furthermore, the data might be extremely skewed to the right (large number of outliers exist) given the housing bubble in Melbourne.
+2. We can see that among the sold properties, there are 7297 Units, 3580 Townhouses, and 23980 Houses. Houses take more than half of the sold total. The reason might be that there are more houses in the market. It might also be that houses are more popular in the housing market. I assume that the price of sold houses is higher than for units and townhouses (Unsually the size of units or townhouses are smaller than houses as well).
+3. I assume there is certain relationship between property price & distance from CBD,price & landsize and price & building area.
+4. The number of properties sold will increase for the time being.
+
+
+#### Before we perform EDA, install the library for further use.
+```{r}
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+```
+
+In the original dataset, property types are identified as "h","t","u". In order to make the variable more readable, it is converted to "House","Townhouse" and "Unit". If there are types other than these three, I convert it to "Unknown" (which doesn't exist in this dataset).
+```{r}
+house$Type <- as.character(house$Type)
+house$Type <- ifelse(house$Type == "h", "House",
+                     ifelse(house$Type == "t","Townhouse",
+                            ifelse(house$Type == "u","Unit","Unknown")))
+house$Type <- as.factor(house$Type)
+```
+
+As I need to analyse the sold house prices, NA data should not be inculded in the dataset. Usually I will replace the NA with the average price of the houses in the same area. However, the property price might vary according to property types, landsize, number of rooms, year built, etc. It is not considered appropriate to use average prices here. The total number of NA in the price variable is 7610. I still have over 20000 data points for meaningful analysis after removing all NAs, therefore. I removed all NAs in price.
+```{r}
+#check price dataset
+nrow(data.frame(house[is.na(house$Price),])) #7610
+
+#clean dataset
+house.allprice <- house[!is.na(house$Price),]
+temp.price <- house.allprice[which(house.allprice$Price <= boxplot.stats(house$Price)$stats[5]),]
+
+#stats
+boxplot.stats(house.allprice$Price)$stats
+```
+
+#### I create density plot of all the property prices and use log scale on it as it's heavily skewed.
+
+```{r}
+p3 <- ggplot(house.allprice,mapping = aes(x = Price))+
+  geom_density(color = "red")+
+  labs(title = "House Price", x = "Property Price")+
+  annotate("text", x = 3e+06, y = 9e-07, label = "Most of the distribution is consentrated \n at the low end: less than 2 millions dollars", size = 3)+
+  theme_minimal()
+
+p4 <- ggplot(house.allprice,mapping = aes(x = Price))+
+  geom_density(color = "blue")+
+  scale_x_log10(breaks = c(100000,500000,1000000,2000000,10000000))+
+  annotate("text", x = 250000, y = 1.5, label = "Most of the sold house were priced \n from $500,000 to $1500,000", size = 3)+
+  labs(title = "Rescaled House Price(Log)", x = "Property Price")+
+  theme_minimal()
+  
+grid.arrange(p3,p4, ncol = 1)
+```
+
+* From the first density plot, we can see that the house price is heavily skewed to the right. Most of the distribution is concentrated at the low end, which means most of the properties are sold for less than two millions dollars in Melbourne. However, there are large number of properties that are sold at extremely high prices.
+
+* After rescalling the density plot, we can see that the price of most of the sold properties ranged from $500,000 to $1,000,000. The properties which price range from $1000,000 to $1500,000 are popular as well.
+
+#### In order to have a better vision of how many houses are sold at what price range, I remove the outliers and clean the data accordingly.
+
+```{r}
+temp.price<- within(temp.price,{
+  IQR <- NA
+  IQR[Price < 85000] <- "Outlier_low"
+  IQR[Price >= 85000 & Price < 634999] <- "1IQR"
+  IQR[Price >= 635000 & Price < 869999] <- "2IQR"
+  IQR[Price >= 870000 & Price < 1294999 ] <- "3IQR"
+  IQR[Price >= 1295000 & Price <= 2285000] <- "4IQR"
+  IQR[Price > 2285000] <- "Outlier_up"
+})
+temp.price$IQR <- as.factor(temp.price$IQR)
+
+```
+
+
+```{r}
+ggplot(temp.price,mapping = aes(x = Price, fill = IQR))+
+  geom_histogram(bins = 30)+
+  labs(title = "House Price without Outliers", x = "Property Price")
+```
+
+From the above histogram, we can see the property prices vary greatly, from close to $100,000 (very rare) to over $2,000,000. About 50% of the properties are sold over $870,000, and 25% of the properties are sold under $1,250,000. The number of the properties sold around $700,000 is the highest, close to 2500. It is fairly clear that properties in Melbourne are very costly and the housing market was bubbling during this period.
+
+
+#### According to the pie chart below, it is clear that over 60% of the sold properties are houses, followed by units at slightly over 20%, and with townhouses only taking about 10% of the market.
+
+```{r}
+ggplot(data = house, mapping = aes(x = Type, y = ..prop.., group = 1)) + 
+  geom_bar(color = c("orange","green","cyan"), fill = c("orange","green","cyan"))+
+  labs(title = "The number of houses sold in Melbourne - Three Types", x = "Property Type")+
+  theme_minimal()+
+  coord_polar()
+```
+
+#### To explore the relationship between property types and their sold prices, I create two boxplots; one with outliers and one without outliers, so that we can see the distribution clearly.
+
+```{r}
+p5 <- ggplot(data = house.allprice, mapping = aes(x = Type, y = Price, fill = Type))+
+  geom_boxplot(outlier.color = "red",outlier.shape = 16, outlier.size = 1)+
+  labs(title = "Price of three types of properties with outliers", x = "Property Type", y = "Property Price")+
+  coord_flip()
+
+p6 <- ggplot(data = temp.price, mapping = aes(x = Type, y = Price, fill = Type)) + 
+  geom_boxplot(outlier.shape = NA)+
+  labs(title = "Price of three types of properties without outliers", x = "Property Type", y = "Property Price")+
+  coord_flip()
+
+grid.arrange(p5, p6, ncol = 1)
+```
+
+* From the first boxplot, we can see that all types of properties have large number of outliers in sold prices. Houses have the most number of outliers, and the prices are much higher than units and townhouses. There are a few units that are more expensive than the median prices of houses and townhouses. They might be very close to the CBD or have a very large landsize/building area.
+
+
+* From the second boxplot, the price distributions of the three types of property are more obvious. House prices vary the most, and unit prices vary the least. The median price of houses is higher than for townhouses. Townhouses are higher than units. 75% of the units were sold at a price lower than 50% of the townhouse price. 
+
+
+#### In order to plot the number of sold properties for the time being, I clean the date data and construct a new table with property type, number of properties sold and count for use.
+
+```{r}
+house$Datenew <- format(as.Date(house$Date,format = "%d/%m/%Y"), "%Y/%m")
+
+df.date <- count(house,Type,Datenew)
+colnames(df.date) <- c("PropertyType","SoldDate","Count")
+df.date$SoldDate <- as.factor(df.date$SoldDate)
+```
+
+#### I plot the number of properties sold from January 2016 to March 2018
+
+```{r}
+ggplot(data = df.date, aes(x = SoldDate, y = Count, group = PropertyType)) +
+  geom_line(aes(colour = PropertyType), position = "stack") +
+  geom_point(aes(colour = PropertyType), position = "stack")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),legend.position = "bottom")
+```
+
+
+*  From the above chart, we can see that the number of properties sold has increased over time, with house sales in particular showing a significant increase. The peak for house sales was in the last half of 2017.
+
+
+* There are some observable parterns when it comes to the number of properties sold. In general, the end and begining of the year is lower compared to other times, as well as around the end of the financial year. However during Apr/May and Sep/Oct periods the number of sold properties tends to increase.
+
+
+* Although the fluctuation is more marked when it comes to housing, the timing of the fluxuations themselves are consistent accross property types.
+
+
+#### Investigate the relationship between property price and their distance from CBD
+
+Prior to visulizing the data, I select the variables that I am interested in which are "Price","Type","Landsize","Distance"and "Building Area".
+
+```{r}
+myvar <- names(house) %in% (c("Price","Type","Landsize","Distance","BuildingArea"))
+h <- house[myvar]
+```
+
+
+The visualisation involves viewing the pair wise comparison that will provide us with an overall perspective of the data. From the charts below, it is clear that too many outliers affect the visualisation, especially between price and landsize & buiding area.
+
+```{r}
+pairs(~Price+Distance+Landsize+BuildingArea, data = h)
+```
+
+First, I would like to investigate the relationship between property price and the distance from the CBD. I removed the NAs in these two variables. I then created a scatter plot.
+
+```{r}
+h <- h[which(!is.na(h$Price) & !is.na(h$Distance)),]
+h$distance <- as.numeric(as.character(h$Distance))
+```
+
+```{r}
+ggplot(data = h,aes(x = distance, y = Price, color = Type))+
+  geom_point(size = 0.1)+ 
+  geom_jitter(alpha = 0.2)+
+  labs(title = "Distance from CBD vs Price", x = "Distance from CBD in Kilometres", y = "Property Price")+
+  theme_minimal()
+```
+
+From the above scatter plot, we can see that the price drops off considerably once we go beyond a distance of 15 kilometers. We can also see that sold units are concentrated within that same 15 kilometer region and there are some more variablity in price for townhouses. Finally, the price for houses that are close to the CBD is significantly higher than for units or townhouses.
+
+
+#### In order to investigate the relationship between price and landsize, on the one hand, and price and buiding area, on the other, I removed the outliers and NA in landsize and buiding area so that we have a better vision of the relationship.
+```{r}
+h.na <- na.omit(h)
+attach(h.na)
+h.stat <- h.na[which(Landsize <= boxplot.stats(Landsize)$stats[5] & 
+                    BuildingArea <= boxplot.stats(BuildingArea)$stats[5]),] 
+detach(h.na)
+```
+
+```{r}
+LP <- ggplot(data = h.stat, aes(x = Landsize, y = Price, color = Type))+
+  geom_point(size = 0.1)+
+  geom_jitter(alpha = 0.2)+
+  labs(title = "Landsize vs Price", y = "Property Price")+
+  theme(legend.position = "bottom")
+
+AP <- ggplot(data = h.stat,aes(x = BuildingArea, y = Price, color = Type))+
+  geom_point(size = 0.1)+
+  geom_jitter(alpha = 0.2)+
+  labs(title = "Building area vs Price", y = "Property Price")+
+  theme(legend.position = "bottom")
+
+grid.arrange(LP, AP, ncol = 2)
+```
+
+* From the avaliable data, there is no observable correlation between land size and property price. Maybe due the the NA we removed, we cannot see a linear correlations here. However, there is an observable correlation when it comes to building area and price.
+
+* Furthermore, there is a much larger range for land size when it comes to houses than with townhouses. Meanwhile, distribution in reported landsize for units indicates that the provided data includes factors such as attached amenities (parking, swimming pools, etc). Building area for units is much more constrained.
+
+
+#### Just out of curiosity, I have also looked at the break down of room numbers per housing type. Unsurprisingly, units comprise the overwhelming number of properties with a single bedroom. For two to four bedroom properties, there are some mixture of property types, with houses becoming increasingly dominant. Once we enter the range of five bedrooms or more, the mix becomes almost entirely that of houses. 
+
+```{r}
+house_room <- house[house$Rooms <= boxplot.stats(house$Rooms)$stats[5], ]
+ggplot(data = house_room, mapping = aes(x = Rooms, fill = Type)) + 
+  geom_bar(alpha = 0.8, position = "fill")+
+  scale_x_discrete(limits=seq(1:7))+
+  labs(title = "Room numbers of property type", x = "Room numbers", y = "Prop of property type")+
+  theme_classic()
+
+```
+
+### Conclusion
+From the analysis above, we can conclude that:
+
+1. The property prices vary according to the property types.The price is extremely skewed to the right (large number of outliers exist), it makes sense given the housing bubble in Melbourne.
+
+2. There are more houses in Melbounre housing market compared to townhouses and units.The price of sold houses is higher than for units and townhouses as well. The fluctuation of the price is more marked when it comes to housing, the timing of the fluxuations themselves are consistent accross all three property types.
+
+3. Regarding the relationship between price and distance to the CBD, the price drops off considerably once we go beyond a distance of 15 kilometers. The price for houses that are close to the CBD is significantly higher than for units or townhouses.
+
+4. From the avaliable data, there is no observable correlation between land size and property price. We need to collect more data to investigate further.
