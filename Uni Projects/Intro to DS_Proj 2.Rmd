@@ -1,0 +1,816 @@
+---
+title: "Intro to DS_Proj 2"
+author: "Shin"
+date: "04/03/2020"
+output: pdf_document
+---
+
+## Project 2 - Modelling Melbourne Housing Market 
+## (Jan 2016 - Mar 2018)
+
+### Introduction
+This project will model the Melbourne Housing Market data using various machine learning modelling methods. The data was collected from Kaggle. This data was scraped from publicly available results posted every week to Domain.com.au. The first part of this report uses classification algorithms (Decision Trees and Naive Bayes Classifier) to predict how likely it is for a buyer to pay more than one million AUD to purchase a property in Melbourne given the data. The second part of this report uses clustering to discover unknown relationships and hidden structures in the dataset.
+
+
+#### Before we perform modelling, install the library for further use
+```{r}
+library(gplots)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+library(ROCR)
+library(tidyverse)
+library(crayon)
+library(class)
+library(ggplot2)
+library(grDevices)
+library(reshape2)
+library(fpc)
+library(dplyr)
+```
+
+
+#### 1. Data Preparation
+
+First, I import the data into R, gaining an overview of the data, confirming if it is appropriate for modelling.
+```{r}
+d <- read.csv("Mel_Housing_FULL.csv", header = T)
+```
+
+```{r}
+str(d)
+```
+
+As my goal is to predict how likely it is for a buyer to pay more than one million AUD to purchase a property given different characteristics (Property type, number of rooms...). I removed all the NAs in the price variable and then converted the price variable into the target variable "Price_Target", where if the price is equal to or more than one million AUD, set 1, otherwise set -1.
+```{r}
+dn <- d[!is.na(d$Price),]
+dn$Price_Target <- ifelse((dn$Price >= 1000000), 1, -1)
+dn$Price_Target  <- as.numeric(dn$Price_Target )
+```
+
+
+There are a few variables which are not appropriate to be selected as feature variables. For instance, there are 351 levels in suburb and 388 levels in SellerG(Real Estate Agent), which might be subject to overfitting. Postcode is associated with suburb. Lattitude and Longtitude contain negative values as well as not sensible for modelling. Price variable should also be removed as target variable Price_Target has been created. 
+
+Numerical variabbles such as Distance,Propertycount and YearBuilt were converted into categorical viarables to better fit with modelling.
+
+```{r}
+#1
+dnew <- subset(dn, select = -c(Suburb,Address,SellerG,Price,Lattitude,Longtitude,Date,CouncilArea,Postcode))
+#2
+dnew$Distance <- cut(as.numeric(dnew$Distance),seq(0,50,5))
+dnew$Propertycount <- cut(as.numeric(dnew$Propertycount),seq(0,25000,2500))
+dnew$YearBuilt <- cut(as.numeric(dnew$YearBuilt),c(0,1800,1900,1950,2000,2100))
+```
+
+After removing unsensible variables and converting some numverical viarables into categorial, the dataset looks cleaner and appropriate for further modelling.
+
+#### 2. Data Pre-processing (prepare for training data, calibration data and testing data).
+
++ Step1: By setting the seed to4009, we make our work reproducible.
++ Step2: Split data into train and test subsets.
++ Step3: Identify which features are categorical and numerical variables.
++ Step4: Choose which outcome is considered positive, here is 1 (price over $1m).
++ Step5: Further split training data into training and calibration.
+
+```{r}
+set.seed(4009)
+dnew$rgroup <- runif(dim(dnew)[[1]])
+#hist(d$rgroup)
+
+dTrainAll <- subset(dnew,rgroup<=0.9) 
+dTest <- subset(dnew,rgroup>0.9) 
+
+vars <- setdiff(colnames(dTrainAll), c('Price_Target','rgroup')) 
+
+catVars <- vars[sapply(dTrainAll[,vars],class) %in% c('factor','character')]
+numericVars <- vars[sapply(dTrainAll[,vars],class) %in% c('numeric','integer')]
+
+outcome <- "Price_Target"
+
+pos <- "1"
+
+useForCal <- rbinom(n=dim(dTrainAll)[[1]],size=1,prob=0.1)>0
+dCal <- subset(dTrainAll,useForCal)
+dTrain <- subset(dTrainAll,!useForCal)
+```
+
+### 3. Building single-variable models
+
+* The following code is the function to build single-variable models for categorical variables.
+```{r}
+mkPredC <- function(outCol,varCol,appCol) {
+  pPos <- sum(outCol==pos)/length(outCol)
+  naTab <- table(as.factor(outCol[is.na(varCol)]))
+  pPosWna <- (naTab/sum(naTab))[pos]
+  vTab <- table(as.factor(outCol),varCol)
+  pPosWv <- (vTab[pos,]+1.0e-3*pPos)/(colSums(vTab)+1.0e-3)
+  pred <- pPosWv[appCol]
+  pred[is.na(appCol)] <- pPosWna
+  pred[is.na(pred)] <- pPos
+  pred
+}
+```
+
+* For each of the categorical variables, we generate the prediction of the probability of price to be above 1 million (including 1 million).
+```{r}
+for(v in catVars) {
+  pi <- paste('pred',v,sep='')
+  dTrain[,pi] <- mkPredC(dTrain[,outcome],
+                         dTrain[,v],dTrain[,v])
+  dCal[,pi] <- mkPredC(dTrain[,outcome],
+                       dTrain[,v],dCal[,v])
+  dTest[,pi] <- mkPredC(dTrain[,outcome],
+                        dTrain[,v],dTest[,v])
+}
+```
+
+* Then we score the categorical variables by AUC, to find the categorical variables that have a good AUC both on the training data and on the calibration data not used during training. These are likely the more useful variables.
+```{r}
+library('ROCR')
+calcAUC <- function(predcol,outcol) {
+  perf <- performance(prediction(predcol,outcol==pos),'auc')
+  as.numeric(perf@y.values)
+}
+
+for(v in catVars) {
+  pi <- paste('pred',v,sep='')
+  aucTrain <- calcAUC(dTrain[,pi],dTrain[,outcome])
+  if(aucTrain>=0.65) {
+    aucCal <- calcAUC(dCal[,pi],dCal[,outcome])
+    print(sprintf(
+      "%s, trainAUC: %4.3f calibrationAUC: %4.3f",
+      pi, aucTrain, aucCal))
+  }
+}
+```
+
+* We convert the numerical prediction score into a decision by checking if the score was above or below 0.5.
+In this case, the AUC is higher than 0.5, which indicates our classifiers are better than random guesses.
+
+* Each variable's training AUC is about the same as its calibration AUC, which indicates my model did well in prediction, no overfitting concern.
+
+#### Using Double dencity plot to check the variable performance
+* For variable predType:
+
+  + The double density plot below is showing the conditional distribution of predType for the price over 1 million (blue line) and price under 1 million (red line).
+
+  + From this plot, we can deduce that low values of predType are rare for price over 1 million, the high values of predType are not rare for price over 1 million. This lets us in turn say that a high value of predType is good evidence that the price will be over 1 million.
+```{r}
+ggplot(data=dCal) +
+geom_density(aes(x=predType,color=as.factor(Price_Target)))
+```
+
+* For variable predRegionname:
+  + The same as the first plot, from the double density plot above, we can say that a high value of predPegionname is good evidence that the price will be over 1 million.
+```{r}
+ggplot(data=dCal) +
+geom_density(aes(x=predRegionname,color=as.factor(Price_Target)))
+```
+
+
+#### Scoreing the numerical feature variables by AUC.
+```{r}
+for(v in numericVars) {
+  pi<-paste('pred',v,sep='')
+  dTrain[,pi]<-mkPredC(dTrain[,outcome],dTrain[,v],dTrain[,v])
+  dTest[,pi]<-mkPredC(dTrain[,outcome],dTrain[,v],dTest[,v])
+  dCal[,pi]<-mkPredC(dTrain[,outcome],dTrain[,v],dCal[,v])
+  aucTrain<-calcAUC(dTrain[,pi],dTrain[,outcome])
+  
+  if(aucTrain>=0.7) {
+    aucCal<-calcAUC(dCal[,pi],dCal[,outcome])
+    print(sprintf(
+      "%s, trainAUC: %4.3f calibrationAUC: %4.3f",
+      pi,aucTrain,aucCal))
+  }
+}
+  
+```
+
+#### Using Double dencity plot to check the variable performance
+* For variable predRooms:
+  + The double density plot below is showing the conditional distribution of predRooms for the price over 1 million (blue line) and price under 1 million (red line).
+
+  + From this plot, we can say that a higher value of predType is good evidence that the price will be over 1 million.
+```{r}
+ggplot(data=dCal) +
+geom_density(aes(x=predRooms,color=as.factor(Price_Target)))
+```
+
+#### Summary
+The double density plots above visualized the predictive power of the selected variables, it indicates the performance of the selected varilabes is good.
+
+
+
+#### Using 100-fold cross-validation to estimate effects of overfitting
+
+Because I want both an unbiased estimate of the model’s future performance on new data (simulated by test data) and an estimate of the distribution of this estimate under typical variations in data and training procedures. I used 100-fold cross-validation here to estimate the degree of overfit hidden in the models. 
+
+```{r}
+#categorical 1
+var <- 'Type'
+aucs <- rep(0,100)
+
+for(rep in 1:length(aucs)) {
+  useForCalRep<-rbinom(n=nrow(dTrainAll),size=1,prob=0.1)>0
+  predRep<-mkPredC(dTrainAll[!useForCalRep,outcome],
+                   dTrainAll[!useForCalRep,var],
+                   dTrainAll[useForCalRep,var])
+  aucs[rep]<-calcAUC(predRep,dTrainAll[useForCalRep,outcome])
+}
+mean(aucs)
+sd(aucs)
+#categorical 2
+var <- 'Regionname'
+aucs <- rep(0,100)
+
+for(rep in 1:length(aucs)) {
+  useForCalRep<-rbinom(n=nrow(dTrainAll),size=1,prob=0.1)>0
+  predRep<-mkPredC(dTrainAll[!useForCalRep,outcome],
+                   dTrainAll[!useForCalRep,var],
+                   dTrainAll[useForCalRep,var])
+  aucs[rep]<-calcAUC(predRep,dTrainAll[useForCalRep,outcome])
+}
+mean(aucs)
+sd(aucs)
+# numerical
+var <- 'Rooms'
+aucs <- rep(0,100)
+
+for(rep in 1:length(aucs)) {
+  useForCalRep<-rbinom(n=nrow(dTrainAll),size=1,prob=0.1)>0
+  predRep<-mkPredC(dTrainAll[!useForCalRep,outcome],
+                   dTrainAll[!useForCalRep,var],
+                   dTrainAll[useForCalRep,var])
+  aucs[rep]<-calcAUC(predRep,dTrainAll[useForCalRep,outcome])
+}
+mean(aucs)
+sd(aucs)
+```
+
+From the outcome we can see that the 100-fold replicated estimate of the AUC for the selected variables Type, Regionname and Rooms have mean:0.68,0.69,0.71 and standard deviation:0.007,0.01,0.009 respectively.
+
+The original estimate of these three variables are 0.69,0.68,0.71 respectively. The estimates of the variables are considered very good.
+
+#### Summary for single variable models
+By building single variable models, we have Type, Regionname and Rooms as our feature variables, after performance on double density plots and 100-fold cross-validation, we are confident that these three variables are appropriate for classification as the feature variables.
+
+
+
+### 4. Building models using multiple variables
+Models that combine the effects of many variables tend to be much more powerful than models that use only a single variable.Therefore, we will build multi-variable models as well.
+
+#### Variable selection
+The performance on the calibration set (not the training set) is used to pick variables here. We don't use the test set for calibration; to do so lessens the reliability of the test set for model quality confirmation.
+
+* Scoring features according to an AIC compute log likelihood
+  + Step 1: compute log likelihood
+
+```{r}
+# Define a convenience function to compute log likelihood.
+logLikelyhood <- function(outCol,predCol) {
+  sum(ifelse(outCol==pos,log(predCol),log(1-predCol)))
+}
+
+# Compute a null model
+nullmodel <- 
+  logLikelyhood(
+    dTrain[,outcome],
+    sum(dTrain[,outcome]==pos)/length(dTrain[,outcome])
+  )
+nullmodel
+
+# Compute the base rate of a saturation model
+baseRateCheck <- 
+  logLikelyhood(
+    dCal[,outcome],
+    sum(dCal[,outcome]==pos)/length(dCal[,outcome])
+  )
+baseRateCheck
+```
+
+The null model here is -14824.51 which tells us what low performance will look like and the saturation model here is -1679.045 which is the best possible model we can have given the data. 
+
+
+  + Step 2: Run through categorical variables 
+Using the log likelihood to select the variables based on the deviance improvement.
+```{r}
+selVars <- c()
+minStep <- 150
+
+for(v in catVars) {
+  pi <- paste('pred',v,sep='')
+  liCheck <- 2*((logLikelyhood(dCal[,outcome],dCal[,pi])
+                 - baseRateCheck))
+  if(liCheck>minStep) {
+    print(sprintf("%s, calibrationScore: %g",pi,liCheck))
+    selVars <- c(selVars,pi)
+  }
+}
+```
+Here we chose 150 as the threshold. If the deviance is greater than 100, this means the model has improved the explanatory power. We then choose those variables as selected variables to do the prediction. 
+
+  + Step 3: Run through numerical variables and select the variable.
+```{r}
+for(v in numericVars) {
+  pi <- paste('pred',v,sep='')
+  liCheck <- 2*((logLikelyhood(dCal[,outcome],dCal[,pi])
+                 - baseRateCheck) - 1)
+  if(liCheck>=minStep) {
+    print(sprintf("%s, calibrationScore: %g", pi,liCheck))
+    selVars <- c(selVars,pi)
+  }
+}
+```
+
+* By building models for multiple variables, we have the categorical variables predType, predDistance, predYearBuilt, predRegionname, predPropertycount and numerical variable predRooms as selected variables for further analysis.
+
+
+###  5 Compare Decision Tree and Naive Bayes Model
+
+#### 5.1 Decision Tree Classification
+
+##### * 5.1.1 Calculating AUC for a decision tree model with all variables
+```{r}
+library('rpart')
+fV <- paste(outcome,'>0 ~ ', 
+            paste(c(catVars,numericVars), collapse=' + '), sep='')
+
+tmodel <- rpart(fV,data=dTrain)
+
+print(calcAUC(predict(tmodel,newdata=dTrain),dTrain[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dTest),dTest[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dCal),dCal[,outcome]))
+
+```
+The model looks good on both training data and calibration/test data. This is also better than the best
+single-variable models on withheld calibration and test data.
+
+##### * 5.1.2 Calculating AUC for a decision tree model with reprocessed categorical variables.
+I also built the model on the reprocessed variables, which hide the categorical levels (replacing them with numeric predictions), and remove NAs (treating them as just another level).
+```{r}
+tVars <- paste('pred',c(catVars,numericVars),sep='')
+fV2 <- paste(outcome,'>0 ~ ',paste(tVars,collapse=' + '),sep='')
+
+tmodel <- rpart(fV2,data=dTrain)
+
+print(calcAUC(predict(tmodel,newdata=dTrain),dTrain[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dTest),dTest[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dCal),dCal[,outcome]))
+```
+The result is about the same compared to the previous one. This model works well on training, calibration and test data. The reason why these two models perform almost the same is possibly becase at the data cleaning stage, we have aleady tidied the data well enough. Distance, Propertycount and YearBuilt variables were converted to numerical variables by the ranges accordingly. 
+
+
+##### * 5.1.3 To further improve the model, We pass in an extra argument, rpart.control, that changes the decision tree selection strategy.
+```{r}
+tmodel <- rpart(fV2,data=dTrain,
+                control=rpart.control(cp=0.001,minsplit=1000,
+                                      minbucket=1000,maxdepth=30)
+)
+
+print(calcAUC(predict(tmodel,newdata=dTrain),dTrain[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dTest),dTest[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dCal),dCal[,outcome]))
+```
+There is a slight improvement compared to the previous model. However, it hasn't improved as much as expected. It's possibly because there is no overfitting in our original model. Our model is considered not complicated to begin with.
+
+##### * 5.1.4 Calculating AUC for a decision tree model with selected variables.
+```{r}
+f <- paste(outcome,'>0 ~ ',paste(selVars,collapse=' + '),sep='')
+tmodel <- rpart(f,data=dTrain,
+                control=rpart.control(cp=0.001,minsplit=1000,
+                                      minbucket=1000,maxdepth=30))
+
+print(calcAUC(predict(tmodel,newdata=dTrain),dTrain[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dTest),dTest[,outcome]))
+print(calcAUC(predict(tmodel,newdata=dCal),dCal[,outcome])) 
+```
+Interestingly, these AUCs are the same as the further improved model. It means modelling with predicted variables is as good as modelling with selected variables. However, the AUCS of models using selected variables are significantly better than any of the AUCs we saw from single variable models when checked on non-training data. So we can conclude that we built a legitimate multiple-variable model.
+
+
+#### * 5.1.5 Printing a decision tree
+From the printed decision tree below, we can see that overall,there are 21995 valid records in our dataset, the deviance of our model is about 5289.467, the probability of being positive (buyer pays more than 1 million for a property) is about 0.4025. The root splits on Housing Type first. 
+
+```{r}
+print(tmodel)
+```
+
+
+#### * 5.1.6 Visualising a decision tree
+```{r}
+par(cex=0.8)
+rpart.plot(tmodel, type = 3, digits = 3, fallen.leaves = T)
+```
+Northern Metropolitan = NM
+Western Metropolitan = WM
+Southern Metropolitan = SM
+Eastern Metropolitan = EM
+South-Eastern Metropolitan = SEM
+Eastern Victoria = EV
+Northern Victoria = NV
+Western Victoria = WV
+
+```{r}
+summary(dTrain[dTrain[,"predType"]<0.208,"Type"])
+summary(dTrain[dTrain[,"predRegionname"]<0.399,"Regionname"])
+```
+#### * If the housing type is unit, and the property is not in region EM or SM, there is a 9.9% chance the buyer pays over 1 million.
+
+```{r}
+summary(dTrain[dTrain[,"predType"]>=0.208,"Type"])
+summary(dTrain[dTrain[,"predRegionname"]>=0.574,"Regionname"])
+unique(dTrain[dTrain[,"predRooms"]>=0.518,"Rooms"])
+```
+#### * If the property is in the Southern Metropolitan region, has more than 4 rooms, and the house type is either townhouse or house, there is 8.5% chance that the buyer pays over 1 million.
+
+```{r}
+summary(dTrain[dTrain[,"predRegionname"]<0.399,"Regionname"])
+summary(dTrain[dTrain[,"predDistance"]<0.436,"Distance"])
+unique(dTrain[dTrain[,"predRooms"]<0.518,"Rooms"])
+```
+#### * If the property is in region NM,WM,SEM,NV,EV,WV, has about 3 rooms, and the distance to DBD is mostly within 10-15km, no matter if the house type is townhouse or house, then there is a 17.3% chance that the buyer pays over 1 million.
+
+
+### 5.2 Naive Bayes Model Classification
+Naive Bayes is a method that memorizes how each training variable is related to outcome, and then makes predictions by multiplying together the effects of each variable. Naive Bayes Model here is more suitable for the dataset.
+
+##### * 5.2.1 Building Naive Bayes Model using all variables.
+```{r}
+#Naive Bayes using the e1071 package - model
+lVars <- c(catVars,numericVars)
+ff <- paste('as.factor(',outcome,'>0) ~ ',
+            paste(lVars,collapse=' + '),sep='')
+
+nbmodel <- naiveBayes(as.formula(ff),data=dTrain)
+
+#Naive Bayes using the e1071 package - prediction
+dTrain$nbpred <- 
+  predict(nbmodel,newdata=dTrain,type='raw')[,'TRUE']
+dCal$nbpred <- 
+  predict(nbmodel,newdata=dCal,type='raw')[,'TRUE']
+dTest$nbpred <- 
+  predict(nbmodel,newdata=dTest,type='raw')[,'TRUE']
+
+calcAUC(dTrain$nbpred,dTrain[,outcome])
+calcAUC(dCal$nbpred,dCal[,outcome])
+calcAUC(dTest$nbpred,dTest[,outcome])
+```
+##### * 5.2.2 Building Naive Bayes Model using reprocessed categorical variables.
+```{r}
+#Naive Bayes using the e1071 package - model
+pVars <- paste('pred',c(catVars,numericVars),sep='')
+ff <- paste('as.factor(',outcome,'>0) ~ ',
+            paste(pVars,collapse=' + '),sep='')
+
+nbmodel <- naiveBayes(as.formula(ff),data=dTrain)
+
+#Naive Bayes using the e1071 package - prediction
+dTrain$nbpred <- 
+  predict(nbmodel,newdata=dTrain,type='raw')[,'TRUE']
+dCal$nbpred <- 
+  predict(nbmodel,newdata=dCal,type='raw')[,'TRUE']
+dTest$nbpred <- 
+  predict(nbmodel,newdata=dTest,type='raw')[,'TRUE']
+
+calcAUC(dTrain$nbpred,dTrain[,outcome])
+calcAUC(dCal$nbpred,dCal[,outcome])
+calcAUC(dTest$nbpred,dTest[,outcome])
+```
+##### * 5.2.3 Building Naive Bayes Model using selected variables.
+```{r}
+#Naive Bayes using the e1071 package - model
+sVars <- paste(selVars,sep='')
+ff <- paste('as.factor(',outcome,'>0) ~ ',
+            paste(sVars,collapse=' + '),sep='')
+
+nbmodel <- naiveBayes(as.formula(ff),data=dTrain)
+
+#Naive Bayes using the e1071 package - prediction
+dTrain$nbpred <- 
+  predict(nbmodel,newdata=dTrain,type='raw')[,'TRUE']
+dCal$nbpred <- 
+  predict(nbmodel,newdata=dCal,type='raw')[,'TRUE']
+dTest$nbpred <- 
+  predict(nbmodel,newdata=dTest,type='raw')[,'TRUE']
+
+calcAUC(dTrain$nbpred,dTrain[,outcome])
+calcAUC(dCal$nbpred,dCal[,outcome])
+calcAUC(dTest$nbpred,dTest[,outcome])
+```
+
+#### Summary
+* From the above modelling, we can see that for Naive Bayes Model, using selected variables is better than using preprocessed variables which is better than using all variables.
+* However, compared to decision tree model, Naive Bayes Model performs slightly worse regarding AUC. Furthermore, with decision trees, we are able to see exactly what decisions will be made for unseen data that we want to predict. It is easier for us to tell how and where the data is splited, we can gain more detailed information from it.
+* Using Decision Tree Model to predict how likely a buyer purchases a property in Melbourne with more than 1 million AUD is more suitable.
+
+
+### 6. Clustering
+We are going to use clustering (unsupervised method) to discover unknown relationships and hidden structures in the dataset.
+
+The goal is to group the regions based on patterns in houseing type, number of bedroom,bathroom, car park,houseing price, the distance to CBD, etc. 
+
+Read data into R.
+```{r}
+h <- read.csv("Mel_Housing_FULL.csv", header = T)
+```
+
+##### * 6.1 Tidy data:
+1. Convert some variables(categorical variables and variables with many levels) into binary variables.
+2. Rename the regions so it's easier to read at visulisation stage.
+3. Remove all the variables which are not sensible in clustering modelling (categorical, meaningless variables,etc.).
+4. Remove all the missing data in dataset.
+```{r}
+dn <- h
+#create new variable Pricebin for Price
+dn <- within(dn,{
+  Pricebin <- NA
+  Pricebin[Price < 1000000] <- 0
+  Pricebin[Price >= 1000000] <- 1
+})
+
+#create new variable Typebin for Type
+dn$Typebin <- ifelse(dn$Type == "h",1,0)
+
+#create new variable BuiltYbin for YearBuilt
+dn <- within(dn,{
+  BuiltYbin <- NA
+  BuiltYbin[YearBuilt <= 1950] <- 0
+  BuiltYbin[YearBuilt > 1950] <- 1
+})
+
+#create new variable BuiltYbin for YearBuilt
+dn <- within(dn,{
+  Region <- NA
+  Region[Regionname == "Northern Metropolitan"] <- "NM"
+  Region[Regionname == "Western Metropolitan"] <- "WM"
+  Region[Regionname == "Southern Metropolitan"] <- "SM"
+  Region[Regionname == "Eastern Metropolitan"] <- "EM"
+  Region[Regionname == "South-Eastern Metropolitan"] <- "SEM"
+  Region[Regionname == "Eastern Victoria"] <- "EV"
+  Region[Regionname == "Northern Victoria"] <- "NV"
+  Region[Regionname == "Western Victoria"] <- "WV"
+})
+
+dn$Region <- as.factor(dn$Region)
+
+#Remove all the variables which are not sensible in clustering modelling.
+subsetd <- subset(dn, select = -c(Suburb,Address,Rooms,Type,Price,SellerG,Method,Date,Lattitude,Longtitude,Postcode,CouncilArea,Postcode,Regionname,Landsize))
+
+#remove NAs
+newd <- subsetd[complete.cases(subsetd),]
+```
+
+##### * 6.2 Rescale variables for comparability.
+We want a unit of change in each coordinate to represent the same degree of difference. Therefore, we use scale() here to transform all the columns to have a mean value of 0 and a standard deviation of 1. 
+Use all the columns except Regionname which is a categorical variable and what we want to group on.
+
+```{r}
+vars.to.use <- colnames(newd)[-length(newd)]
+pmatrix <- scale(newd[,vars.to.use])
+```
+
+
+##### * 6.3 Hierarchical clustering with hclust()
+We first compute the distance matrix using the function dist().
+Then the hclust() function takes it as the input a distance matrix and outputs a dendrogram.
+```{r}
+#Create the distance matrix.
+#Compute the pairwise distance using dist()
+d <- dist(pmatrix, method="euclidean")
+#Clustering using hclust()
+pfit <- hclust(d, method="ward.D")
+plot(pfit, labels=newd$Region)
+rect.hclust(pfit, k=3)
+```
+##### * 6.4 Print out the clusters with the interested variables
+
+```{r}
+groups <- cutree(pfit, k=3)
+```
+
+```{r}
+print_clusters <- function(labels, k) {
+  for(i in 1:k) {
+    print(paste("cluster", i))
+    print(newd[labels==i,
+                  c("Region","Pricebin","Typebin","Distance","Bedroom2")])
+  }
+}
+print_clusters(groups, 3)
+
+
+```
+
+```{r}
+table(groups,newd$Region)
+a4 = aggregate(newd[,-c(11)],list(groups),median)
+data.frame(Cluster=a4[,1],a4[,-1])
+```
+41%,30%,22% of the properties in cluster 1 are from Southern Metropolitan,Northern Metropolitan,Western Metropolitan respectively.
+28%,26%,17% of the properties in cluster 2 are from Northern Metropolitan,Western Metropolitan,Eastern Metropolitan respectively.
+41%,31%,18% of the properties in cluster 3 are from Southern Metropolitan,Northern Metropolitan,Western Metropolitan respectively.
+
+* All 8 regions in Melbourne are spread out across all three clusters.
+* By comparasion, cluster1, 3 have half of the properties which are about 8km away from CBD closer than half of the properties in cluster2. 
+* The buildingArea of properties in Cluster1, 2 are larger than those in cluster3, there are more houses in cluster1, 2 compared to cluster 3. However if we look at the the year of built, half of the properties in cluster 3 were built after year 2000. Half built before 1925 in cluster1 and half built before 1980 in cluster2.
+
+
+##### * 6.5 Visualising Cluster - Plot
+We can try to visualize the clustering by projecting the data onto the first two principal components of the data.
+From the graph below, we can see that cluster1 and 3 have very good seperation, however a lot of data points in cluster 2 are overlapping with cluster 1 and 3. From the previous analysis, we can say that becasue the properties in cluster 2 share some similar characteristics with the properties in cluster 1 and 3.
+```{r}
+library(ggplot2)
+# Calculate the principle components of pmatrix
+princ <- prcomp(pmatrix)
+nComp <- 2
+project <- as.data.frame(predict(princ, newdata=pmatrix)[,1:nComp])
+project.plus <- 
+  cbind(project,
+        cluster=as.factor(groups),
+        Region=newd$Region)
+
+# finding convex hull
+library('grDevices')
+h <- do.call(
+  rbind, 
+  lapply(
+    unique(groups),
+    function(c) { 
+      f <- subset(project.plus,cluster==c); 
+      f[chull(f),]
+    }
+  )
+)
+
+p <- ggplot(project.plus, aes(x=PC1, y=PC2)) +
+  geom_point(aes(shape=cluster, color=cluster)) +
+  geom_text(aes(label=Region, color=cluster),
+            hjust=0, vjust=1, size=2) +
+  geom_polygon(data=h,
+               aes(group=cluster,
+                   fill=as.factor(cluster)),
+               alpha=0.4,linetype=0) 
+p
+```
+
+##### * 6.6 Bootstrap Evaluation of Clusters
+One way to assess whether a cluster represents true structure is to see if the cluster holds up under plausible variations in the dataset. Here we use clusterboot() functiono from the fpc package which uses bootstrap resampling to evaluate how stable a given cluster is. We set k = 3 in this case.
+```{r}
+kbest.p <- 3
+cboot.hclust <- clusterboot(
+  pmatrix, clustermethod=hclustCBI,
+  method="ward.D", k=kbest.p)
+```
+
+The count of how many times each cluster was dissolved. By default clusterboot() runs 100 bootstrap iterations.
+if the clusters with stability values more than 0.85, then they can be considered highly stable. According to the outcome below, clusters 1,2,3 all have stability values of 1, which indicates these clusters are very stable.
+```{r}
+1-cboot.hclust$bootbrd/100
+```
+
+
+##### * 6.6 Selecting K 
+###### Solution 1: Compute the total within sum of squares (WSS) for different values of k and look for an “elbow” in the curve
+
+```{r}
+# Function to calculate squared distance 
+# between two vectors x and y
+sqr_edist <- function(x, y) {
+  sum((x-y)^2)
+}
+
+## Fucntion to calculate WSS of a cluster
+wss.cluster <- function(clustermat) {
+  c0 <- apply(clustermat, 2, FUN=mean)
+  sum(apply(clustermat, 1, 
+            FUN=function(row){sqr_edist(row,c0)}))
+}
+
+## Function to compute the total WSS from a set of data points and cluster labels.
+wss.total <- function(dmatrix, labels) {
+  wsstot <- 0
+  k <- length(unique(labels))
+  for(i in 1:k){
+    wsstot <- wsstot + 
+      wss.cluster(subset(dmatrix, labels==i))
+  }
+  wsstot
+}
+
+#Convenience function to calculate the total sum of squares
+totss <- function(dmatrix) {
+  grandmean <- apply(dmatrix, 2, FUN=mean)
+  sum(apply(dmatrix, 1, 
+            FUN=function(row){
+              sqr_edist(row, grandmean)
+              }
+            )
+      )
+}
+
+```
+
+###### The folloing code is a convenience function to calculate the total sum of squares
+```{r}
+ch_criterion <- function(dmatrix, kmax, method="kmeans") {
+  if(!(method %in% c("kmeans", "hclust"))){ 
+    stop("method must be one of c('kmeans', 'hclust')")
+  }
+  npts <- dim(dmatrix)[1] # number of rows.
+  totss <- totss(dmatrix)
+  wss <- numeric(kmax)
+  crit <- numeric(kmax)
+  wss[1] <- (npts-1)*sum(apply(dmatrix, 2, var))
+  for(k in 2:kmax) {
+    if(method=="kmeans") {
+      clustering<-kmeans(dmatrix, k, nstart=10, iter.max=100)
+      wss[k] <- clustering$tot.withinss
+    }else { # hclust
+      d <- dist(dmatrix, method="euclidean")
+      pfit <- hclust(d, method="ward.D")
+      labels <- cutree(pfit, k=k)
+      wss[k] <- wss.total(dmatrix, labels)
+    }
+  }
+  bss <- totss - wss
+  crit.num <- bss/(0:(kmax-1))
+  crit.denom <- wss/(npts - 1:kmax)
+  list(crit = crit.num/crit.denom, wss = wss, totss = totss)
+}
+```
+
+###### Evaluating clusterings with different numbers of clusters
+
+```{r}
+library(reshape2)
+
+clustcrit <- ch_criterion(pmatrix, 10, method="hclust")
+critframe <- data.frame(k=1:10, ch=scale(clustcrit$crit),
+wss=scale(clustcrit$wss))
+critframe <- melt(critframe, id.vars=c("k"),
+                  variable.name="measure",
+                  value.name="score")
+
+p<-ggplot(critframe, aes(x=k, y=score, color=measure)) +
+  geom_point(aes(shape=measure)) + 
+  geom_line(aes(linetype=measure)) +
+  scale_x_continuous(breaks=1:10, labels=1:10)
+
+p
+```
+From the above figure, the CH criterion is maximized at k=3, with another local maximum at k=1. Let's assume that the WSS plot also has an elbow at k=3. 
+
+So it is sensible to choose 3 as the cluster number for out dataset.
+
+###### Solution 2: The k-means algorithm
+When the data is all numeric and the distance metric is squared Euclidean, we can use K-means. It is easy to implement and can be faster than hierarchical clustering on large datasets, which is suitable for our dataset. However the major disadvantage is that we must pick k in advance. 
+Let’s run kmeans() on the protein data (scaled to 0 mean and unit standard deviation, as before). We’ll use k=5, as shown in the next listing
+```{r}
+pclusters <- kmeans(pmatrix, kbest.p, 
+                    nstart=100, iter.max=100)
+```
+
+###### Using kmeansruns() to pick K
+
+```{r}
+#CH criterio
+clustering.ch <- kmeansruns(
+  pmatrix, krange=1:10, criterion="ch")
+clustering.ch$bestk
+
+#Average silhouette width
+clustering.asw <- kmeansruns(
+  pmatrix, krange=1:10, criterion="asw")
+clustering.asw$bestk
+
+```
+Run kmeansruns() from 1–10 clusters, and the CH criterion & the average silhouette width criterion. 
+By default, kmeansruns() uses 100 random starts and 100 maximum iterations per run. We can see the result above.
+For our dataset, the CH criterion picks 3 clusters, the Average silhouette width also picks 3 clusters.
+
+###### Plot K against CH and ASW
+```{r}
+critframe <- data.frame(k=1:10, ch=scale(clustering.ch$crit),
+                        asw=scale(clustering.asw$crit))
+
+critframe <- melt(critframe, id.vars=c("k"),
+                  variable.name="measure",
+                  value.name="score")
+
+p<- ggplot(critframe, aes(x=k, y=score, color=measure)) +
+  geom_point(aes(shape=measure)) + 
+  geom_line(aes(linetype=measure)) +
+  scale_x_continuous(breaks=1:10, labels=1:10)
+
+p
+```
+The above figure shows the plot of the CH and ASW indices for 1–10 clusters on our dataset which provided by kmeansruns.
+They suggest 3 clusters is the best choice for our dataset.
+
+### Summary
+After using Hiearchical clustering, Elbow Method and kmeans, we conclude K = 3 is the best number for clustering regions of Melbourne.
+
+## Conclusion
+In this report, we first utilised decision tree classification to predict how likely it is for a buyer to pay more than one million AUD to purchase a property in Melbourne given different characteristics of the properties. Then we used the clustering to reveal the relationships between the characteristics of the properties and regions in Melbourne.
+
+We have used different methods to ensure that our variable selection and models are valid for the analysis. 
